@@ -12,23 +12,38 @@ from chainercv.links import SSD300
 from chainercv.links import SSD512
 from chainercv import utils
 from chainercv.visualizations import vis_bbox
+from chainer import iterators
+
+from chainercv.datasets import directory_parsing_label_names
+from chainercv.datasets import DirectoryParsingLabelDataset
+from chainercv.links import FeaturePredictor
+from chainercv.links import ResNet101
+from chainercv.links import ResNet152
+from chainercv.links import ResNet50
+from chainercv.links import VGG16
+
+from chainercv.utils import apply_to_iterator
+from chainercv.utils import ProgressHook
+
 
 import pyrealsense2 as rs
+import caffe
 
 pipeline = rs.pipeline()
 config = rs.config()
 config.enable_stream(rs.stream.color, 1920, 1080, rs.format.bgr8, 30)
 pipeline.start(config)
 
-LIGHTWEIGHT_COEF = 1.5 # this may have no mean depending on the environment
+LIGHTWEIGHT_COEF = 1 # this may have no mean depending on the environment
 
 def main():
-    model = YOLOv3(
+    model_phase1 = YOLOv3(
         n_fg_class=len(voc_bbox_label_names),
         pretrained_model='voc0712')
 
+
     chainer.cuda.get_device_from_id(0).use()
-    model.to_gpu()
+    model_phase1.to_gpu()
 
     accum_time = 0
     curr_fps = 0
@@ -46,12 +61,14 @@ def main():
         result = frame.copy()
         img = np.asarray(rgb, dtype=np.float32).transpose((2, 0, 1))
 
-        bboxes, labels, scores = model.predict([img])
+        bboxes, labels, scores = model_phase1.predict([img])
         bbox, label, score = bboxes[0], labels[0], scores[0]
 
         if len(bbox) != 0:
             for i, bb in enumerate(bbox):
                 lb = label[i]
+                if lb != 14:
+                    continue
                 conf = score[i].tolist()
                 ymin = int(bb[0] * LIGHTWEIGHT_COEF)
                 xmin = int(bb[1] * LIGHTWEIGHT_COEF)
@@ -61,7 +78,7 @@ def main():
                 class_num = int(lb)
                 cv2.rectangle(result, (xmin, ymin), (xmax, ymax), voc_semantic_segmentation_label_colors[class_num], 2)
 
-                text = voc_bbox_label_names[class_num] + " " + ('%.2f' % conf)
+                text = "person"
                 print(text)
 
                 text_top = (xmin, ymin - 10)
