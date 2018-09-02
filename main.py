@@ -6,6 +6,7 @@ from timeit import default_timer as timer
 
 import chainer
 from chainercv.datasets import voc_bbox_label_names, voc_semantic_segmentation_label_colors
+from chainercv.links import FasterRCNNVGG16
 from chainercv.links import YOLOv2
 from chainercv.links import YOLOv3
 from chainercv.links import SSD300
@@ -24,14 +25,17 @@ from chainercv.links import VGG16
 
 from chainercv.utils import apply_to_iterator
 from chainercv.utils import ProgressHook
+import builtins
 
 
 import pyrealsense2 as rs
 import caffe
+import os
 
 pipeline = rs.pipeline()
 config = rs.config()
 config.enable_stream(rs.stream.color, 1920, 1080, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
 pipeline.start(config)
 
 LIGHTWEIGHT_COEF = 1 # this may have no mean depending on the environment
@@ -40,6 +44,7 @@ def main():
     model_phase1 = YOLOv3(
         n_fg_class=len(voc_bbox_label_names),
         pretrained_model='voc0712')
+        #pretrained_model='voc07')
 
 
     chainer.cuda.get_device_from_id(0).use()
@@ -54,7 +59,10 @@ def main():
     while True:
         fframes = pipeline.wait_for_frames()
         color_frame = fframes.get_color_frame()
+        depth_frame = fframes.get_depth_frame()
         frame = np.asanyarray(color_frame.get_data())
+        depth_image = np.asanyarray(depth_frame.get_data())
+        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
 
         # BGR -> RGB
         rgb = cv2.cvtColor(cv2.resize(frame, (int(frame.shape[1] / LIGHTWEIGHT_COEF), int(frame.shape[0] / LIGHTWEIGHT_COEF))), cv2.COLOR_BGR2RGB)
@@ -76,20 +84,28 @@ def main():
                 xmax = int(bb[3] * LIGHTWEIGHT_COEF)
 
                 class_num = int(lb)
-                cv2.rectangle(result, (xmin, ymin), (xmax, ymax), voc_semantic_segmentation_label_colors[class_num], 2)
+                cv2.rectangle(result, (xmin, ymin), (xmax, ymax), voc_semantic_segmentation_label_colors[class_num], 5)
+                #cv2.rectangle(depth_colormap, (int(xmin * 2 / 3), int(ymin * 2 / 3)), (int(xmax * 2 / 3), int(ymax * 2 / 3)), voc_semantic_segmentation_label_colors[class_num], 5)
 
                 text = "person"
-                print(text)
+                ftext = text
 
                 text_top = (xmin, ymin - 10)
                 text_bot = (xmin + 80, ymin + 5)
                 text_pos = (xmin + 5, ymin)
+                text_top1 = (int(text_top[0] * 2 / 3), int(text_top[1] * 2 / 3))
+                text_bot1 = (int(text_bot[0] * 2 / 3), int(text_bot[1] * 2 / 3))
+                text_pos1 = (int(text_pos[0] * 2 / 3), int(text_pos[1] * 2 / 3))
 
                 # Draw label 1
                 cv2.rectangle(result, text_top, text_bot,
-                              voc_semantic_segmentation_label_colors[class_num], -1)
-                cv2.putText(result, text, text_pos,
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                             voc_semantic_segmentation_label_colors[class_num], -1)
+                cv2.putText(result, ftext, text_pos,
+                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                #cv2.rectangle(depth_colormap, text_top1, text_bot1,
+                #              voc_semantic_segmentation_label_colors[class_num], -1)
+                #cv2.putText(depth_colormap, ftext, text_pos1,
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
 
         curr_time = timer()
         exec_time = curr_time - prev_time
@@ -101,7 +117,7 @@ def main():
             fps = "FPS:" + str(curr_fps)
             curr_fps = 0
 
-        # Draw FPS in top right corner
+        #Draw FPS in top right corner
         cv2.rectangle(result, (590, 0), (640, 17), (0, 0, 0), -1)
         cv2.putText(result, fps, (595, 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
@@ -110,9 +126,18 @@ def main():
         cv2.rectangle(result, (0, 0), (50, 17), (0, 0, 0), -1)
         cv2.putText(result, str(frame_count), (0, 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        #cv2.rectangle(depth_colormap, (590, 0), (640, 17), (0, 0, 0), -1)
+        #cv2.putText(depth_colormap, fps, (595, 10),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+        # Draw Frame Number
+        #cv2.rectangle(depth_colormap, (0, 0), (50, 17), (0, 0, 0), -1)
+        #cv2.putText(depth_colormap, str(frame_count), (0, 10),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
         # Output Result
         cv2.imshow("Yolo Result", result)
+        #cv2.imshow("Realsense", depth_colormap)
 
         # Stop Processing
         if cv2.waitKey(1) & 0xFF == ord('q'):
