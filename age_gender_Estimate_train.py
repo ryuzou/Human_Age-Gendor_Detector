@@ -40,7 +40,7 @@ height = 128
 
 batchsize = 64
 gpu_id = 0
-max_epoch = 10
+max_epoch = 20
 
 AGE_LABLES = ['1-5', '6-10', '11-15', '16-20', '21-25', '26-30', '31-40', '41-50', '51-60', '61-']#0,1,2,3,4,5,6,7,8,9
 GENDER_LABLES = ['MALE', 'FEMALE']#0,1
@@ -64,7 +64,7 @@ class MLP(Chain):
 
 def resize(img):
     global counter
-    print(counter)
+    #print(counter)
     counter = counter + 1
     img = Image.fromarray(img.transpose(1, 2, 0))
     img = img.resize((width, height), Image.BICUBIC)
@@ -89,8 +89,8 @@ def load_image():
     datasets = []
     for FP in filepaths:
         num = num + 1
-        if num >= 2000:
-            break
+        #if num >= 2000:
+        #    break
         try:
             label1 = int(re.split(r'_', re.split(r'/', FP)[2])[0])
             label2 = int(re.split(r'_', re.split(r'/', FP)[2])[1])
