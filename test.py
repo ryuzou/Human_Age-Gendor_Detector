@@ -1,138 +1,215 @@
-import cv2
+import chainer
+import chainercv
+import caffe
+import os
 import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+import cv2
+import cupy as xp
+import glob
+from itertools import chain
+import random
+import re
+
+from chainer.datasets import LabeledImageDataset
+from chainer import datasets
+from tqdm import tqdm_notebook
+from chainer.datasets import TransformDataset
+from itertools import chain
+from chainer import Chain
+from chainer import serializers
+
+import chainer
+import chainer.links as L
+import chainer.functions as F
+
+from chainer import Chain
+from chainer.links.caffe import CaffeFunction
+from chainer import serializers
+
+from chainer import iterators
+from chainer import training
+from chainer import optimizers
+from chainer.training import extensions
+from chainer.training import triggers
+from chainer.dataset import concat_examples
+
+width = 128
+height = 128
+
+batchsize = 64
+gpu_id = 0
+initial_lr = 0.01
+lr_drop_epoch = 10
+lr_drop_ratio = 0.1
+train_epoch = 20
+
+AGE_LABLES = ['1-5', '6-10', '11-15', '16-20', '21-25', '26-30', '31-40', '41-50', '51-60', '61-']#0,1,2,3,4,5,6,7,8,9
+GENDER_LABLES = ['MALE', 'FEMALE']#0,1
+#LABLES = [('1-5', 'MALE'), ('1-5', 'FEMALE')...('61-', 'MALE', ('61-', 'FEMALE'))]#0,1,2,..18,19
+
+class Illust2Vec(Chain):
+
+    CAFFEMODEL_FN = 'illust2vec_ver200.caffemodel'
+
+    def __init__(self, n_classes, unchain=True):
+        w = chainer.initializers.HeNormal()
+        model = CaffeFunction(self.CAFFEMODEL_FN)  # CaffeModelを読み込んで保存します。（時間がかかります）
+        del model.encode1  # メモリ節約のため不要なレイヤを削除します。
+        del model.encode2
+        del model.forwards['encode1']
+        del model.forwards['encode2']
+        model.layers = model.layers[:-2]
+
+        super(Illust2Vec, self).__init__()
+        with self.init_scope():
+            self.trunk = model  # 元のIllust2Vecモデルをtrunkとしてこのモデルに含めます。
+            self.fc7 = L.Linear(None, 4096, initialW=w)
+            self.bn7 = L.BatchNormalization(4096)
+            self.fc8 = L.Linear(4096, n_classes, initialW=w)
+
+    def __call__(self, x):
+        h = self.trunk({'data': x}, ['conv6_3'])[0]  # 元のIllust2Vecモデルのconv6_3の出力を取り出します。
+        h.unchain_backward()
+        h = F.dropout(F.relu(self.bn7(self.fc7(h))))  # ここ以降は新しく追加した層です。
+        return self.fc8(h)
+
+def resize(img):
+    img = Image.fromarray(img.transpose(1, 2, 0))
+    img = img.resize((width, height), Image.BICUBIC)
+    return np.asarray(img).transpose(2, 0, 1)
+
+# 各データに行う変換
+def transform(inputs):
+    img, label = inputs
+    img = img[:3, ...]
+    img = resize(img.astype(np.uint8))
+    img = img - mean[:, None, None]
+    img = img.astype(np.float32)
+    # ランダムに左右反転
+    if np.random.rand() > 0.5:
+        img = img[..., ::-1]
+    return img, label
 
 
-# 追跡対象の色範囲（Hueの値域）
-def is_target(roi):
-    return (roi <= 30) | (roi >= 150)
+def load_image():
+    num = 0
+    print(num)
+    filepaths = glob.glob('Dataset/Data/*.jpg')
 
-
-# マスクから面積最大ブロブの中心座標を算出
-def max_moment_point(mask):
-    # ラベリング処理
-    label = cv2.connectedComponentsWithStats(mask)
-    data = np.delete(label[2], 0, 0)  # ブロブのデータ
-    center = np.delete(label[3], 0, 0)  # 各ブロブの中心座標
-    moment = data[:, 4]  # 各ブロブの面積
-    max_index = np.argmax(moment)  # 面積最大のインデックス
-    return center[max_index]  # 面積最大のブロブの中心座標
-
-
-# パーティクルの初期化
-def initialize(img, N):
-    mask = img.copy()  # 画像のコピー
-    mask[is_target(mask) == False] = 0  # マスク画像の作成（追跡対象外の色なら画素値0）
-    x, y = max_moment_point(mask)  # マスクから面積最大ブロブの中心座標を算出
-    w = calc_likelihood(x, y, img)  # 尤度の算出
-    ps = np.ndarray((N, 3), dtype=np.float32)  # パーティクル格納用の配列を生成
-    ps[:] = [x, y, w]  # パーティクル用配列に中心座標と尤度をセット
-    return ps
-
-
-# 1.リサンプリング(前状態の重みに応じてパーティクルを再選定)
-def resampling(ps):
-    # 累積重みの計算
-    ws = ps[:, 2].cumsum()
-    last_w = ws[ws.shape[0] - 1]
-    # 新しいパーティクル用の空配列を生成
-    new_ps = np.empty(ps.shape)
-    # 前状態の重みに応じてパーティクルをリサンプリング（重みは1.0）
-    for i in range(ps.shape[0]):
-        w = np.random.rand() * last_w
-        new_ps[i] = ps[(ws > w).argmax()]
-        new_ps[i, 2] = 1.0
-
-    return new_ps
-
-
-# 2.推定（パーティクルの位置）
-def predict_position(ps, var=13.0):
-    # 分散に従ってランダムに少し位置をずらす
-    ps[:, 0] += np.random.randn((ps.shape[0])) * var
-    ps[:, 1] += np.random.randn((ps.shape[0])) * var
-
-
-# 尤度の算出
-def calc_likelihood(x, y, img, w=30, h=30):
-    # 画像から座標(x,y)を中心とする幅w, 高さhの矩形領域の全画素を取得
-    x1, y1 = max(0, x - w / 2), max(0, y - h / 2)
-    x2, y2 = min(img.shape[1], x + w / 2), min(img.shape[0], y + h / 2)
-    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-    roi = img[y1:y2, x1:x2]
-    # 矩形領域中に含まれる追跡対象(色)の存在率を尤度として計算
-    count = roi[is_target(roi)].size
-    return (float(count) / img.size) if count > 0 else 0.0001
-
-
-# パーティクルの重み付け
-def calc_weight(ps, img):
-    # 尤度に従ってパーティクルの重み付け
-    for i in range(ps.shape[0]):
-        ps[i][2] = calc_likelihood(ps[i, 0], ps[i, 1], img)
-
-    # 重みの正規化
-    ps[:, 2] *= ps.shape[0] / ps[:, 2].sum()
-
-
-# 3.観測（全パーティクルの重み付き平均を取得）
-def observer(ps, img):
-    # パーティクルの重み付け
-    calc_weight(ps, img)
-    # 重み和の計算
-    x = (ps[:, 0] * ps[:, 2]).sum()
-    y = (ps[:, 1] * ps[:, 2]).sum()
-    # 重み付き平均を返す
-    return (x, y) / ps[:, 2].sum()
-
-
-# パーティクルフィルタ
-def particle_filter(ps, img, N=300):
-    # パーティクルが無い場合
-    if ps is None:
-        ps = initialize(img, N)  # パーティクルを初期化
-
-    ps = resampling(ps)  # 1.リサンプリング
-    predict_position(ps)  # 2.推定
-    x, y = observer(ps, img)  # 3.観測
-    return ps, int(x), int(y)
-
-
-def main():
-    # パーティクル格納用の変数
-    ps = None
-
-    # カメラのキャプチャ
-    cap = cv2.VideoCapture(0)
-
-    while cv2.waitKey(30) < 0:
-        ret, frame = cap.read()
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV_FULL)
-        h = hsv[:, :, 0]
-
-        # S, Vを2値化（大津の手法）
-        ret, s = cv2.threshold(hsv[:, :, 1], 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-        ret, v = cv2.threshold(hsv[:, :, 2], 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-        h[(s == 0) | (v == 0)] = 100
-
-        # パーティクルフィルタ
-        ps, x, y = particle_filter(ps, h, 300)
-
-        if ps is None:
+    datasets = []
+    for FP in filepaths:
+        num = num + 1
+        #if num == 100:
+        #    break
+        img = FP
+        try:
+            label1 = int(re.split(r'_', re.split(r'/', FP)[2])[0])
+            label2 = int(re.split(r'_', re.split(r'/', FP)[2])[1])
+        except Exception:
             continue
-        # 画像の範囲内にあるパーティクルのみ取り出し
-        ps1 = ps[(ps[:, 0] >= 0) & (ps[:, 0] < frame.shape[1]) &
-                 (ps[:, 1] >= 0) & (ps[:, 1] < frame.shape[0])]
-        # パーティクルを赤色で塗りつぶす
-        for i in range(ps1.shape[0]):
-            frame[int(ps1[i, 1]), int(ps1[i, 0])] = [0, 0, 200]
-            # パーティクルの集中部分を赤い矩形で囲む
-        cv2.rectangle(frame, (x - 20, y - 20), (x + 20, y + 20), (0, 0, 200), 5)
+        #if num == 1000:
+        #    break
+        t1 = np.array(label2, dtype=np.int32) # gender classificate
+        t2 = np.array(label1, dtype=np.int32) # age classificate
+        if 1 <= t2 <= 5:
+            t = t1 + (0 * 2)
+        elif 6 <= t2 <= 10:
+            t = t1 + (1 * 2)
+        elif 11 <= t2 <= 15:
+            t = t1 + (2 * 2)
+        elif 16 <= t2 <= 20:
+            t = t1 + (3 * 2)
+        elif 21 <= t2 <= 25:
+            t = t1 + (4 * 2)
+        elif 26 <= t2 <= 30:
+            t = t1 + (5 * 2)
+        elif 31 <= t2 <= 40:
+            t = t1 + (6 * 2)
+        elif 41 <= t2 <= 50:
+            t = t1 + (7 * 2)
+        elif 51 <= t2 <= 60:
+            t = t1 + (8 * 2)
+        elif 61 <= t2:
+            t = t1 + (9 * 2)
 
-        cv2.imshow('Result', frame)
+        datasets.append((img,t))
+        print(num)
 
-    cap.release()
-    cv2.destroyAllWindows()
+    random.shuffle(datasets)
+    return datasets
 
+def Train_main():
+    global mean
+    DS = load_image()
+    d = LabeledImageDataset(DS)
+    if not os.path.exists('Dataset/image_mean.npy'):
+        print("caluculating mean")
+        t, _ = datasets.split_dataset_random(d, int(len(d) * 0.8), seed=0)
+        mean = np.zeros((3, height, width))
+        for img in t:
+            try:
+                img = resize(img[0].astype(np.uint8))
+                mean += img
+            except Exception:
+                continue
+        mean = mean / float(len(d))
+        np.save('Dataset/image_mean.npy', mean)
+    else:
+        mean = np.load('Dataset/image_mean.npy')
+    td = TransformDataset(d, transform)
+    train, valid = datasets.split_dataset_random(td, int(len(d) * 0.8), seed=0)
+    mean = mean.mean(axis=(1, 2))
 
-if __name__ == "__main__":
-    main()
+    n_classes = 20
+    model = Illust2Vec(n_classes)
+    model = L.Classifier(model)
+
+    train_iter = iterators.MultiprocessIterator(train, batchsize)
+    valid_iter = iterators.MultiprocessIterator(valid, batchsize, repeat=False, shuffle=False)
+
+    optimizer = optimizers.MomentumSGD(lr=initial_lr)
+    optimizer.setup(model)
+    optimizer.add_hook(chainer.optimizer.WeightDecay(0.0001))
+
+    updater = training.StandardUpdater(train_iter, optimizer, device=gpu_id)
+
+    trainer = training.Trainer(updater, (train_epoch, 'epoch'), out='AnimeFace-result')
+    trainer.extend(extensions.LogReport())
+    trainer.extend(extensions.observe_lr())
+    # 標準出力に書き出したい値
+    trainer.extend(extensions.PrintReport(
+        ['epoch',
+         'main/loss',
+         'main/accuracy',
+         'val/main/loss',
+         'val/main/accuracy',
+         'elapsed_time',
+         'lr']))
+
+    # ロスのプロットを毎エポック自動的に保存
+    trainer.extend(extensions.PlotReport(
+        ['main/loss',
+         'val/main/loss'],
+        'epoch', file_name='loss.png'))
+
+    # 精度のプロットも毎エポック自動的に保存
+    trainer.extend(extensions.PlotReport(
+        ['main/accuracy',
+         'val/main/accuracy'],
+        'epoch', file_name='accuracy.png'))
+
+    # モデルのtrainプロパティをFalseに設定してvalidationするextension
+    trainer.extend(extensions.Evaluator(valid_iter, model, device=gpu_id), name='val')
+
+    # 指定したエポックごとに学習率をlr_drop_ratio倍にする
+    trainer.extend(
+        extensions.ExponentialShift('lr', lr_drop_ratio),
+        trigger=(lr_drop_epoch, 'epoch'))
+
+    trainer.run()
+    return td, d, datasets
+
+if __name__ == '__main__':
+    td, d, DS = Train_main()
