@@ -49,7 +49,6 @@ GENDER_LABLES = ['MALE', 'FEMALE']#0,1
 counter = 0
 
 class MLP(Chain):
-
     def __init__(self, n_mid_units=100, n_out=20):
         super(MLP, self).__init__()
         with self.init_scope():
