@@ -1,70 +1,98 @@
 import os.path,sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__))+'/../../')
-#os.environ['KERAS_BACKEND'] = 'theano'
 from keras.models import Model
 from keras.layers import Dense, GlobalAveragePooling2D,Input
 from keras.applications.vgg16 import VGG16
 from keras.preprocessing.image import ImageDataGenerator
 import keras.callbacks
 import scipy.ndimage
+import numpy as np
+import keras
+from keras.applications.vgg16 import VGG16
+from keras.preprocessing.image import ImageDataGenerator
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Flatten
+from keras import optimizers
 
-N_CATEGORIES  = 20
-IMAGE_SIZE = 224
-BATCH_SIZE = 16
+nb_classes  = 20
+base_dir = '.'
+prefix = 'vgg16'
+n_train_samples = 21027
+train_file_name = 'bottleneck_features_train.npy'
 
-NUM_TRAINING = sum([len(files) for r, d, files in os.walk("Dataset/traindat/")])
-NUM_VALIDATION = sum([len(files) for r, d, files in os.walk("Dataset/testdat/")])
-#NUM_TRAINING = 30000
+n_validation_samples = 1000
+validation_file_name = 'bottleneck_features_validation.npy'
 
-input_tensor = Input(shape=(IMAGE_SIZE, IMAGE_SIZE, 3))
-base_model = VGG16(weights='imagenet', include_top=False,input_tensor=input_tensor)
-
-x = base_model.output
-x = GlobalAveragePooling2D()(x)
-x = Dense(1024, activation='relu')(x)
-predictions = Dense(N_CATEGORIES, activation='softmax')(x)
-model = Model(inputs=base_model.input, outputs=predictions)
-
-for layer in base_model.layers:
-   layer.trainable = False
-from keras.optimizers import SGD
-model.compile(optimizer=SGD(lr=0.0001, momentum=0.9), loss='categorical_crossentropy',metrics=['accuracy'])
-
+# VGG16(model & weight)をインポート
+model = VGG16(include_top=False, weights='imagenet')
 model.summary()
 
-train_datagen = ImageDataGenerator(
-   rescale=1.0 / 255,
-   shear_range=0.2,
-   zoom_range=0.2,
-   horizontal_flip=True,
-   rotation_range=10)
-
-test_datagen = ImageDataGenerator(
-   rescale=1.0 / 255,
+# 画像データをnumpy arrayに変換
+## training dataの読み込み
+image_data_generator = ImageDataGenerator(rescale=1.0/255)
+train_data = image_data_generator.flow_from_directory(
+    'Dataset/traindat',
+    target_size=(150, 150),
+    batch_size=32,
+    class_mode=None,
+    shuffle=False
 )
 
-train_generator = train_datagen.flow_from_directory(
-   'Dataset/traindat',
-   target_size=(IMAGE_SIZE, IMAGE_SIZE),
-   batch_size=BATCH_SIZE,
-   class_mode='categorical',
-   shuffle=True
+## validation dataの読み込み
+image_data_generator = ImageDataGenerator(rescale=1.0/255)
+validation_data = image_data_generator.flow_from_directory(
+    'Dataset/testdat',
+    target_size=(150, 150),
+    batch_size=32,
+    class_mode=None,
+    shuffle=False
 )
 
-validation_generator = test_datagen.flow_from_directory(
-   'Dataset/traindat',
-   target_size=(IMAGE_SIZE, IMAGE_SIZE),
-   batch_size=BATCH_SIZE,
-   class_mode='categorical',
-   shuffle=True
-)
+# VGG16を使用してボトルネック特徴量データを生成する
+## training data
+bottleneck_feature_train = model.predict_generator(train_data, n_train_samples, verbose=1)
 
-hist = model.fit_generator(train_generator,
-   steps_per_epoch=NUM_TRAINING//BATCH_SIZE,
-   epochs=50,
-   verbose=1,
-   validation_data=validation_generator,
-   validation_steps=NUM_VALIDATION//BATCH_SIZE,
-   )
+## validation data
+bottleneck_feature_validation = model.predict_generator(validation_data, n_validation_samples, verbose=1)
 
-model.save('face_gender_age.hdf5')
+# bottleneck featuresの保存
+## traning data
+np.save(base_dir + prefix + train_file_name, bottleneck_feature_train)
+
+## validation data
+np.save(base_dir + prefix + validation_file_name, bottleneck_feature_validation)
+
+# Bottleneck featuresの読み込み
+train_data  = np.load(base_dir + prefix + train_file_name)
+len_input_samples = len(train_data)
+train_labels = np.array([0] * int(len_input_samples/2) + [1] * int(len_input_samples / 2))
+
+validation_data = np.load(base_dir + prefix + validation_file_name)
+validation_labels = np.array([0] * int(n_validation_samples / 2 *32) + [1] * int(n_validation_samples / 2 * 32))
+
+input_shape = train_data.shape[1:]
+
+model = Sequential()
+model.add(Flatten(input_shape=input_shape))
+model.add(Dense(256, activation='relu'))
+model.add(Dropout(0.5))
+model.add(Dense(nb_classes, activation='softmax'))
+
+model.compile(loss='binary_crossentropy', optimizer=optimizers.SGD(lr=1e-4, momentum=0.9), metrics=['accuracy'])
+
+result_dir = 'history_vgg16_transfer_learning.txt'
+
+# callbacks
+callbacks = keras.callbacks.TensorBoard(log_dir='tensorBoard', histogram_freq=0)
+
+# train model
+history = model.fit(train_data, train_labels, epochs=20, batch_size=32, callbacks=[callbacks], validation_data=(validation_data, validation_labels))
+
+# Save weight
+model.save_weights('vgg16_transferlearning_weights.h5')
+
+# Save history
+loss = history.history['loss']
+acc = history.history['acc']
+val_loss = history.history['val_loss']
+val_acc = history.history['val_acc']
